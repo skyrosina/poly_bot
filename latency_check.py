@@ -30,9 +30,13 @@ except ImportError:
 DEFAULT_CLOB_API_URL = "https://clob.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 BINANCE_REST_PING_URL = "https://api.binance.com/api/v3/ping"
+BINANCE_REST_TIME_URL = "https://api.binance.com/api/v3/time"
 BINANCE_REST_PRICE_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 DEFAULT_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+ALT_PORT_BINANCE_WS_URL = "wss://stream.binance.com:443/ws/btcusdt@trade"
 MARKET_DATA_BINANCE_WS_URL = "wss://data-stream.binance.vision/ws/btcusdt@trade"
+AGG_TRADE_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+MARKET_DATA_AGG_TRADE_BINANCE_WS_URL = "wss://data-stream.binance.vision/ws/btcusdt@aggTrade"
 PERIOD_SECONDS = {5: 300, 15: 900}
 
 
@@ -113,6 +117,44 @@ def sample_http(name: str, url: str, samples: int, timeout: float) -> CheckResul
         except Exception as exc:
             result.errors.append(str(exc))
         time.sleep(0.15)
+    return result
+
+
+def sample_binance_time_offset(samples: int, timeout: float) -> CheckResult:
+    result = CheckResult(
+        name="binance.server_time_offset",
+        note="absolute offset; signed_avg shown",
+    )
+    signed_offsets = []
+    rtts = []
+    for _ in range(samples):
+        try:
+            local_start_ms = time.time() * 1000
+            data, status, elapsed_ms = http_get_json(BINANCE_REST_TIME_URL, timeout)
+            local_end_ms = time.time() * 1000
+            if status < 200 or status >= 300:
+                result.errors.append(f"HTTP {status}")
+                continue
+
+            server_time = float(data.get("serverTime", 0)) if isinstance(data, dict) else 0.0
+            if server_time <= 0:
+                result.errors.append("missing serverTime")
+                continue
+
+            midpoint_ms = (local_start_ms + local_end_ms) / 2
+            signed_offset = server_time - midpoint_ms
+            signed_offsets.append(signed_offset)
+            rtts.append(elapsed_ms)
+            result.samples_ms.append(abs(signed_offset))
+        except Exception as exc:
+            result.errors.append(str(exc))
+        time.sleep(0.15)
+
+    if signed_offsets:
+        result.note = (
+            f"abs offset; signed_avg={statistics.mean(signed_offsets):+.0f}ms; "
+            f"rtt_avg={statistics.mean(rtts):.0f}ms"
+        )
     return result
 
 
@@ -341,6 +383,8 @@ def main():
         ("binance.rest.price", BINANCE_REST_PRICE_URL),
     ]
 
+    results = [sample_binance_time_offset(samples, timeout)]
+
     if up_token:
         endpoints.extend(
             [
@@ -362,12 +406,15 @@ def main():
             )
         )
 
-    results = [sample_http(name, url, samples, timeout) for name, url in endpoints]
+    results.extend(sample_http(name, url, samples, timeout) for name, url in endpoints)
     if not args.skip_ws:
         if args.compare_binance_ws:
             ws_checks = [
-                ("stream", DEFAULT_BINANCE_WS_URL),
+                ("stream9443", DEFAULT_BINANCE_WS_URL),
+                ("stream443", ALT_PORT_BINANCE_WS_URL),
                 ("marketdata", MARKET_DATA_BINANCE_WS_URL),
+                ("aggtrade", AGG_TRADE_BINANCE_WS_URL),
+                ("marketdata_agg", MARKET_DATA_AGG_TRADE_BINANCE_WS_URL),
             ]
             configured = args.binance_ws_url.strip()
             if configured not in [url for _, url in ws_checks]:

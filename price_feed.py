@@ -22,19 +22,26 @@ class PriceState:
     """Thread-safe container for current BTC price."""
     price: float = 0.0
     timestamp: float = 0.0
+    exchange_lag_ms: float = 0.0
     source: str = "none"
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def update(self, price: float, source: str = "ws"):
+    def update(self, price: float, source: str = "ws", event_time_ms: int = 0):
         with self._lock:
+            now = time.time()
             self.price = price
-            self.timestamp = time.time()
+            self.timestamp = now
+            self.exchange_lag_ms = max(0.0, (now * 1000) - event_time_ms) if event_time_ms else 0.0
             self.source = source
 
     def get(self) -> tuple[float, float]:
         """Returns (price, age_in_seconds)."""
         with self._lock:
             return self.price, time.time() - self.timestamp
+
+    def get_lag_ms(self) -> float:
+        with self._lock:
+            return self.exchange_lag_ms
 
     @property
     def is_fresh(self) -> bool:
@@ -84,8 +91,9 @@ class BinancePriceFeed:
                                 msg = await asyncio.wait_for(ws.recv(), timeout=30)
                                 data = json.loads(msg)
                                 price = float(data.get("p", 0))
+                                event_time_ms = int(data.get("E", 0) or 0)
                                 if price > 0:
-                                    self.state.update(price, source="ws")
+                                    self.state.update(price, source="ws", event_time_ms=event_time_ms)
                                     if self._on_price:
                                         self._on_price(price)
                     except Exception as e:

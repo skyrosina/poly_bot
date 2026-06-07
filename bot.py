@@ -103,6 +103,7 @@ class PolyBot:
         self._vol_cap = float(os.getenv("VOL_CAP", "0.30"))
         self._vol_fallback = 0.12  # used until enough windows accumulate
         self._entry_confirm_seconds = float(os.getenv("ENTRY_CONFIRM_SECONDS", "0.0"))
+        self._max_btc_feed_lag_ms = float(os.getenv("MAX_BTC_FEED_LAG_MS", "0"))
 
         if not self.dry_run and self._live_safe_mode:
             self.strategy_config.min_prob = max(self.strategy_config.min_prob, 0.90)
@@ -122,6 +123,8 @@ class PolyBot:
             self._daily_loss_limit = min(self._daily_loss_limit, 5.0)
             self._vol_floor = max(self._vol_floor, 0.12)
             self._entry_confirm_seconds = max(self._entry_confirm_seconds, 2.0)
+            if self._max_btc_feed_lag_ms <= 0:
+                self._max_btc_feed_lag_ms = 700.0
 
         self.price_feed = BinancePriceFeed()
         self.executor = Executor(
@@ -168,6 +171,7 @@ class PolyBot:
         self._residual_shares: float = 0.0  # Shares left after partial fill
         self._last_position_check: float = 0.0
         self._last_status_print: float = 0.0
+        self._last_feed_lag_warn: float = 0.0
         self._last_tick_context: dict = {}   # last entry-window state, for window-end signal logging
         self._session_start_time: float = time.time()
         self._recent_window_deltas: list = []  # rolling abs(close_delta_pct) per window
@@ -202,7 +206,10 @@ class PolyBot:
         self._price_last_fetched: float = 0.0
         self._PRICE_REFRESH: float = float(os.getenv("PRICE_REFRESH_SECONDS", "5.0"))
         if not self.dry_run and self._live_safe_mode:
-            self._PRICE_REFRESH = min(self._PRICE_REFRESH, 2.0)
+            self._PRICE_REFRESH = min(self._PRICE_REFRESH, 1.0)
+        self._market_cache = None
+        self._market_cache_window: int = 0
+        self._market_cache_last_fetch: float = 0.0
 
         # Entry confirmation: live mode waits briefly for the same-side signal
         # to persist so tiny late-window flips do not trigger immediate buys.
@@ -258,6 +265,8 @@ class PolyBot:
               f"T-{self.strategy_config.entry_window_end}s")
         if self._entry_confirm_seconds > 0:
             print(f"  Entry confirmation: {self._entry_confirm_seconds:.1f}s same-side signal")
+        if self._max_btc_feed_lag_ms > 0:
+            print(f"  Max BTC feed lag: {self._max_btc_feed_lag_ms:.0f}ms")
         print(f"  Vol: dynamic (fallback=0.12, floor={self._vol_floor}, cap={self._vol_cap}, windows={self._rolling_vol_windows})")
         print(f"  Exits: hold to resolution")
         print(f"  Daily loss limit: ${self._daily_loss_limit:.0f}")
@@ -327,12 +336,30 @@ class PolyBot:
         if not is_fresh or btc_price <= 0:
             return
 
+        feed_lag_ms = self.price_feed.state.get_lag_ms()
+        feed_source = self.price_feed.state.source
+        feed_lag_too_high = (
+            not self.dry_run
+            and self._max_btc_feed_lag_ms > 0
+            and feed_source == "ws"
+            and feed_lag_ms > self._max_btc_feed_lag_ms
+        )
+        if feed_lag_too_high:
+            if now - self._last_feed_lag_warn >= 10:
+                self._last_feed_lag_warn = now
+                print(
+                    f"  Feed lag high: {feed_lag_ms:.0f}ms > "
+                    f"{self._max_btc_feed_lag_ms:.0f}ms - skipping entries"
+                )
+
         if window_ts != self._current_window:
             self._on_new_window(window_ts, closing_btc_price=btc_price)
 
         seconds_remaining = (window_ts + period_secs) - now
 
         if self._opening_price <= 0:
+            if feed_lag_too_high:
+                return
             self._opening_price = btc_price
             print(f"  📌 Open: ${btc_price:,.2f}")
 
@@ -343,6 +370,10 @@ class PolyBot:
 
         # Already done
         if self._traded or self._trade_attempted:
+            return
+
+        if feed_lag_too_high:
+            self._reset_entry_candidate()
             return
 
         # IDLE: look for entry
@@ -673,6 +704,9 @@ class PolyBot:
         self._cached_up = 0.50
         self._cached_down = 0.50
         self._price_last_fetched = 0.0
+        self._market_cache = None
+        self._market_cache_window = 0
+        self._market_cache_last_fetch = 0.0
         self._pending_buy_side = ""
         self._pending_buy_price = 0.0
         self._pending_buy_amount = 0.0
@@ -735,6 +769,24 @@ class PolyBot:
         self._candidate_since = 0.0
         self._candidate_delta_pct = 0.0
 
+    def _get_current_market_cached(self):
+        if self.dry_run or not self.executor._initialized:
+            return None
+
+        now = time.time()
+        if self._market_cache and self._market_cache_window == self._current_window:
+            return self._market_cache
+        if now - self._market_cache_last_fetch < 2.0:
+            return None
+
+        self._market_cache_last_fetch = now
+        market = get_current_market(self.period)
+        if market and market.window_start == self._current_window:
+            self._market_cache = market
+            self._market_cache_window = self._current_window
+            return market
+        return None
+
     def _get_market_prices(self, btc_price: float, seconds_remaining: float) -> tuple:
         if self.dry_run or not self.executor._initialized:
             if self._opening_price <= 0:
@@ -751,7 +803,7 @@ class PolyBot:
             return self._cached_up, self._cached_down
 
         try:
-            market = get_current_market(self.period)
+            market = self._get_current_market_cached()
             if not market:
                 return self._cached_up, self._cached_down
 
@@ -815,10 +867,13 @@ class PolyBot:
             self.telegram.status_update({"alert": msg})
             return
 
-        market = get_current_market(self.period) if not self.dry_run else None
+        market = self._get_current_market_cached() if not self.dry_run else None
         token_id = ""
         if market:
             token_id = market.token_id_up if sig.side == "UP" else market.token_id_down
+        elif not self.dry_run:
+            print("  Market not found for current window - skipping live entry")
+            return
         else:
             token_id = f"DRY-{sig.side}-{self._current_window}"
 

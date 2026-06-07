@@ -112,7 +112,8 @@ MAX_BET=5.0
 BANKROLL=100.0
 DAILY_LOSS_LIMIT=5.0
 VOL_FLOOR=0.12
-PRICE_REFRESH_SECONDS=2.0
+PRICE_REFRESH_SECONDS=1.0
+MAX_BTC_FEED_LAG_MS=700
 ```
 
 Set `BANKROLL` to the amount you want the bot to size against. In live mode,
@@ -120,6 +121,8 @@ the bot overwrites this with the actual CLOB collateral balance after startup.
 
 `LIVE_SAFE_MODE=true` is recommended for live testing. It forces a conservative
 minimum threshold even if older `.env` values are still present.
+If Binance WebSocket messages arrive more than `MAX_BTC_FEED_LAG_MS` late,
+live safe mode skips new entries until the feed recovers.
 
 ## 5. Optional Telegram Alerts
 
@@ -174,12 +177,18 @@ python latency_check.py --samples 3 --compare-binance-ws --ws-duration 20
 The latency checker is read-only. It tests Polymarket CLOB/Gamma public
 endpoints and Binance REST/WebSocket. For this bot, CLOB price/book and Binance
 WebSocket should ideally average below about 350 ms.
+`binance.server_time_offset` should ideally stay near zero; values under about
+100-200 ms are usually fine for this bot.
 
 If `data-stream.binance.vision` is faster on your server, set this in `.env`:
 
 ```env
 BINANCE_WS_URL=wss://data-stream.binance.vision/ws/btcusdt@trade
 ```
+
+The comparison also tests Binance's alternative `:443` port and `aggTrade`
+streams. If one of those has clearly lower sustained lag, use that full URL as
+`BINANCE_WS_URL`.
 
 ```bash
 py bot.py
