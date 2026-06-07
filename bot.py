@@ -40,7 +40,15 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 from market import get_current_market, current_window_ts, PERIOD_SECONDS
 from price_feed import BinancePriceFeed
 from strategy import evaluate, estimate_true_probability, get_skip_reason, StrategyConfig, TradingStats
-from executor import Executor, FILLED, PARTIAL, FAILED, MAX_BUY_PRICE
+from executor import (
+    Executor,
+    FILLED,
+    PARTIAL,
+    FAILED,
+    MAX_BUY_PRICE,
+    POLY_MIN_NOTIONAL,
+    calculate_order_size,
+)
 from telegram_notifier import TelegramNotifier
 from tracker import Tracker
 
@@ -71,6 +79,7 @@ class PolyBot:
         load_dotenv()
 
         self.dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+        self._live_safe_mode = _env_bool("LIVE_SAFE_MODE", "true")
         self.use_tor = _env_bool("USE_TOR", "false")
         self.check_geoblock = _env_bool("CHECK_GEOBLOCK", "true")
         self.period = int(os.getenv("MARKET_PERIOD", "5"))
@@ -78,6 +87,7 @@ class PolyBot:
         self.strategy_config = StrategyConfig(
             min_edge=float(os.getenv("MIN_EDGE", "0.05")),
             min_prob=float(os.getenv("MIN_PROB", "0.80")),
+            safety_factor=float(os.getenv("SAFETY_FACTOR", "0.85")),
             min_btc_delta=float(os.getenv("MIN_BTC_DELTA", "0.06")),
             entry_window_start=int(os.getenv("ENTRY_WINDOW_START", "240")),
             entry_window_end=int(os.getenv("ENTRY_WINDOW_END", "10")),
@@ -92,6 +102,26 @@ class PolyBot:
         self._vol_floor = float(os.getenv("VOL_FLOOR", "0.06"))
         self._vol_cap = float(os.getenv("VOL_CAP", "0.30"))
         self._vol_fallback = 0.12  # used until enough windows accumulate
+        self._entry_confirm_seconds = float(os.getenv("ENTRY_CONFIRM_SECONDS", "0.0"))
+
+        if not self.dry_run and self._live_safe_mode:
+            self.strategy_config.min_prob = max(self.strategy_config.min_prob, 0.90)
+            self.strategy_config.min_edge = max(self.strategy_config.min_edge, 0.10)
+            self.strategy_config.safety_factor = min(self.strategy_config.safety_factor, 0.85)
+            self.strategy_config.min_btc_delta = max(self.strategy_config.min_btc_delta, 0.10)
+            self.strategy_config.entry_window_start = min(
+                self.strategy_config.entry_window_start, 25
+            )
+            self.strategy_config.entry_window_end = max(
+                self.strategy_config.entry_window_end, 10
+            )
+            self.strategy_config.kelly_fraction = min(
+                self.strategy_config.kelly_fraction, 0.10
+            )
+            self.strategy_config.max_bet = min(self.strategy_config.max_bet, 5.0)
+            self._daily_loss_limit = min(self._daily_loss_limit, 5.0)
+            self._vol_floor = max(self._vol_floor, 0.12)
+            self._entry_confirm_seconds = max(self._entry_confirm_seconds, 2.0)
 
         self.price_feed = BinancePriceFeed()
         self.executor = Executor(
@@ -170,7 +200,15 @@ class PolyBot:
         self._cached_up: float = 0.50
         self._cached_down: float = 0.50
         self._price_last_fetched: float = 0.0
-        self._PRICE_REFRESH: float = 5.0
+        self._PRICE_REFRESH: float = float(os.getenv("PRICE_REFRESH_SECONDS", "5.0"))
+        if not self.dry_run and self._live_safe_mode:
+            self._PRICE_REFRESH = min(self._PRICE_REFRESH, 2.0)
+
+        # Entry confirmation: live mode waits briefly for the same-side signal
+        # to persist so tiny late-window flips do not trigger immediate buys.
+        self._candidate_side: str = ""
+        self._candidate_since: float = 0.0
+        self._candidate_delta_pct: float = 0.0
 
         # Circuit breaker — detects CLOB API degradation
         self._consecutive_buy_failures: int = 0
@@ -211,13 +249,21 @@ class PolyBot:
         print(f"  Mode: {'DRY RUN' if self.dry_run else '🔴 LIVE TRADING'}")
         print(f"  Kelly: {kf*100:.0f}% fraction | "
               f"Bets: ${self.strategy_config.min_bet:.0f}–${self.strategy_config.max_bet:.0f}")
-        print(f"  Min prob: {mp:.0%} | Min edge: {me:.0%} | Min BTC delta: {self.strategy_config.min_btc_delta:.2f}%")
+        print(
+            f"  Min prob: {mp:.0%} | Min edge: {me:.0%} | "
+            f"Safety: {self.strategy_config.safety_factor:.0%} | "
+            f"Min BTC delta: {self.strategy_config.min_btc_delta:.2f}%"
+        )
         print(f"  Entry: T-{self.strategy_config.entry_window_start}s to "
               f"T-{self.strategy_config.entry_window_end}s")
+        if self._entry_confirm_seconds > 0:
+            print(f"  Entry confirmation: {self._entry_confirm_seconds:.1f}s same-side signal")
         print(f"  Vol: dynamic (fallback=0.12, floor={self._vol_floor}, cap={self._vol_cap}, windows={self._rolling_vol_windows})")
         print(f"  Exits: hold to resolution")
         print(f"  Daily loss limit: ${self._daily_loss_limit:.0f}")
         print(f"  Bankroll: ${self.stats.bankroll:.2f}")
+        if not self.dry_run:
+            print(f"  Live safe mode: {'ON' if self._live_safe_mode else 'OFF'}")
         print("=" * 55)
 
         if not self.dry_run:
@@ -322,10 +368,16 @@ class PolyBot:
             "seconds_remaining": seconds_remaining,
             "window_ts": self._current_window,
             "signal": signal_result,
+            "unconfirmed": False,
         }
 
         if signal_result:
+            if not self._entry_signal_confirmed(signal_result, now):
+                self._last_tick_context["unconfirmed"] = True
+                return
             self._execute_trade(signal_result, seconds_remaining)
+        else:
+            self._reset_entry_candidate()
 
         if now - self._last_status_print >= 30:
             self._last_status_print = now
@@ -473,6 +525,7 @@ class PolyBot:
 
     def _on_new_window(self, window_ts: int, closing_btc_price: float = 0.0):
         if self._current_window > 0:
+            resolved_pending_phantom = False
             # Resolve any pending phantom sell from the previous window.
             # Must run before trade state is reset below.
             # Balance is fetched once here and reused by the sync below.
@@ -485,7 +538,7 @@ class PolyBot:
                         if balance_increase > pp["expected_revenue"] * 0.50:
                             # Settlement landed — it was a real win
                             profit = balance_increase - pp["cost"]
-                            self.stats.record_win(profit)
+                            self.stats.record_win(profit, update_bankroll=False)
                             self.stats.bankroll = real_bal
                             self._last_real_balance = real_bal
                             print(f"  ✅ Phantom resolved: WIN +${profit:.2f} [phantom_resolved] | "
@@ -504,7 +557,7 @@ class PolyBot:
                         else:
                             # Balance still hasn't moved — genuine loss
                             net_loss = pp["cost"] - pp["exit_revenue"]
-                            self.stats.record_loss(net_loss)
+                            self.stats.record_loss(net_loss, update_bankroll=False)
                             self.stats.bankroll = real_bal
                             self._last_real_balance = real_bal
                             print(f"  ❌ Phantom confirmed: LOSS -${net_loss:.2f} [phantom_confirmed] | "
@@ -521,11 +574,13 @@ class PolyBot:
                                 claim_result="phantom_confirmed",
                             )
                         self._pending_phantom = {}
+                        resolved_pending_phantom = True
                 else:
                     # Dry run or executor not ready — treat as loss
                     net_loss = pp["cost"] - pp["exit_revenue"]
                     self.stats.record_loss(net_loss)
                     self._pending_phantom = {}
+                    resolved_pending_phantom = True
 
             # Record closing delta for rolling vol calculation
             if self._opening_price > 0 and closing_btc_price > 0:
@@ -558,20 +613,23 @@ class PolyBot:
                                 self._pending_buy_edge, self._pending_buy_delta)
 
             self.stats.hourly.record_window(self._traded)
-            if self._traded:
+            if self._traded and not resolved_pending_phantom:
                 self._resolve_previous_trade()
             elif self._last_tick_context:
                 # Log the no-trade signal for this window using last tick state
                 ctx = self._last_tick_context
-                skip_reason = get_skip_reason(
-                    btc_price=ctx["btc_price"],
-                    opening_price=self._opening_price,
-                    up_market_price=ctx["up_price"],
-                    down_market_price=ctx["down_price"],
-                    seconds_remaining=ctx["seconds_remaining"],
-                    config=self.strategy_config,
-                    realized_vol=self._compute_realized_vol(),
-                )
+                if ctx.get("unconfirmed"):
+                    skip_reason = "entry_unconfirmed"
+                else:
+                    skip_reason = get_skip_reason(
+                        btc_price=ctx["btc_price"],
+                        opening_price=self._opening_price,
+                        up_market_price=ctx["up_price"],
+                        down_market_price=ctx["down_price"],
+                        seconds_remaining=ctx["seconds_remaining"],
+                        config=self.strategy_config,
+                        realized_vol=self._compute_realized_vol(),
+                    )
                 sig = ctx.get("signal")
                 self.tracker.log_signal(
                     window_ts=ctx["window_ts"],
@@ -585,7 +643,7 @@ class PolyBot:
                     market_price=sig.market_price if sig else 0.0,
                     edge=sig.edge if sig else 0.0,
                     kelly_size=sig.kelly_size if sig else 0.0,
-                    action="no_signal",
+                    action="skipped_unconfirmed" if ctx.get("unconfirmed") else "no_signal",
                     skip_reason=skip_reason,
                 )
 
@@ -623,6 +681,7 @@ class PolyBot:
         self._pending_buy_edge = 0.0
         self._pending_buy_delta = 0.0
         self._balance_before_buy = 0.0
+        self._reset_entry_candidate()
 
         t = time.strftime("%H:%M:%S", time.localtime(window_ts))
         print(f"\n{'─' * 55}")
@@ -655,6 +714,26 @@ class PolyBot:
             vol = statistics.stdev(self._recent_window_deltas)
             return max(self._vol_floor, min(self._vol_cap, vol))
         return self._vol_fallback
+
+    def _entry_signal_confirmed(self, sig, now: float) -> bool:
+        if self._entry_confirm_seconds <= 0:
+            return True
+
+        if self._candidate_side != sig.side:
+            self._candidate_side = sig.side
+            self._candidate_since = now
+            self._candidate_delta_pct = sig.btc_delta_pct
+            return False
+
+        if abs(sig.btc_delta_pct) > abs(self._candidate_delta_pct):
+            self._candidate_delta_pct = sig.btc_delta_pct
+
+        return (now - self._candidate_since) >= self._entry_confirm_seconds
+
+    def _reset_entry_candidate(self):
+        self._candidate_side = ""
+        self._candidate_since = 0.0
+        self._candidate_delta_pct = 0.0
 
     def _get_market_prices(self, btc_price: float, seconds_remaining: float) -> tuple:
         if self.dry_run or not self.executor._initialized:
@@ -759,6 +838,32 @@ class PolyBot:
                 actual_edge = sig.true_prob - actual_price
                 print(f"  📊 Actual price: ${actual_price:.3f} (edge: {actual_edge:.3f})")
 
+                if actual_price > sig.true_prob * self.strategy_config.safety_factor:
+                    print(
+                        f"  Price failed safety factor: ${actual_price:.3f} > "
+                        f"{self.strategy_config.safety_factor:.0%} of prob "
+                        f"{sig.true_prob:.2f} - skipping"
+                    )
+                    btc_approx = self._opening_price * (1 + sig.btc_delta_pct / 100) if self._opening_price > 0 else 0
+                    self.tracker.log_signal(
+                        window_ts=self._current_window,
+                        btc_price=btc_approx,
+                        opening_price=self._opening_price,
+                        up_price=self._cached_up,
+                        down_price=self._cached_down,
+                        seconds_remaining=seconds_remaining,
+                        side=sig.side,
+                        true_prob=sig.true_prob,
+                        market_price=actual_price,
+                        edge=actual_edge,
+                        kelly_size=sig.kelly_size,
+                        action="skipped_safety_factor",
+                        skip_reason="safety_factor",
+                        actual_price=actual_price,
+                        actual_edge=actual_edge,
+                    )
+                    return
+
                 if actual_edge < self.strategy_config.min_edge:
                     print(f"  ⚠️  Edge gone at market price — skipping")
                     btc_approx = self._opening_price * (1 + sig.btc_delta_pct / 100) if self._opening_price > 0 else 0
@@ -782,6 +887,25 @@ class PolyBot:
                     return
 
                 hint_price = actual_price
+
+        if hint_price > 0:
+            _, projected_spend = calculate_order_size(hint_price, trade_amount)
+            if (
+                not self.dry_run
+                and self.stats.bankroll > 0
+                and projected_spend > self.stats.bankroll
+            ):
+                print(
+                    f"  Not enough pUSD for minimum order: "
+                    f"${projected_spend:.2f} needed, ${self.stats.bankroll:.2f} available"
+                )
+                return
+        elif not self.dry_run and self.stats.bankroll < POLY_MIN_NOTIONAL:
+            print(
+                f"  pUSD balance ${self.stats.bankroll:.2f} below "
+                f"${POLY_MIN_NOTIONAL:.0f} minimum order - skipping"
+            )
+            return
 
         result = self.executor.buy(token_id=token_id, amount_usd=trade_amount, price=hint_price)
 
@@ -871,9 +995,9 @@ class PolyBot:
         if self._exited:
             profit = self._exit_revenue - self._trade_cost
             if profit > 0:
-                self.stats.record_win(profit)
+                self.stats.record_win(profit, update_bankroll=False)
             else:
-                self.stats.record_loss(abs(profit))
+                self.stats.record_loss(abs(profit), update_bankroll=False)
             result_emoji = "✅ WIN" if profit > 0 else "❌ LOSS"
             residual_note = f" (~{self._residual_shares:.0f} residual)" if self._residual_shares >= 1 else ""
             print(f"  {result_emoji} (exited{residual_note}) ${profit:+.2f} | "
@@ -932,7 +1056,7 @@ class PolyBot:
         if self._last_sell_price_seen > 0 and self._last_sell_price_seen < 0.50:
             net_loss = original_cost - self._exit_revenue
             profit = -net_loss
-            self.stats.record_loss(net_loss)
+            self.stats.record_loss(net_loss, update_bankroll=False)
             partial_note = f" (partial exit ${self._exit_revenue:.2f})" if self._exit_revenue > 0 else ""
             print(f"  ❌ LOSS{partial_note} -${net_loss:.2f} [market_price] | "
                   f"P&L: ${self.stats.total_pnl:+.2f} | "
@@ -1065,10 +1189,12 @@ class PolyBot:
             else:
                 resolution_payout = remaining_shares * 1.0
                 total_received = self._exit_revenue + resolution_payout
-                self.stats.bankroll += resolution_payout
-                self._unclaimed_winnings += resolution_payout
+                if self.dry_run:
+                    self.stats.bankroll += resolution_payout
+                else:
+                    self._unclaimed_winnings += resolution_payout
             profit = total_received - original_cost
-            self.stats.record_win(profit)
+            self.stats.record_win(profit, update_bankroll=False)
             partial_note = f" (partial exit ${self._exit_revenue:.2f})" if self._exit_revenue > 0 else ""
             claimed_note = " (claimed)" if claim_revenue > 0 else " (unclaimed)"
             print(f"  ✅ WIN{partial_note}{claimed_note} +${profit:.2f} [{resolution_method}] | "
@@ -1078,7 +1204,7 @@ class PolyBot:
         else:
             net_loss = original_cost - self._exit_revenue
             profit = -net_loss
-            self.stats.record_loss(net_loss)
+            self.stats.record_loss(net_loss, update_bankroll=False)
             partial_note = f" (partial exit ${self._exit_revenue:.2f})" if self._exit_revenue > 0 else ""
             print(f"  ❌ LOSS{partial_note} -${net_loss:.2f} [{resolution_method}] | "
                   f"P&L: ${self.stats.total_pnl:+.2f} | "

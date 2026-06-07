@@ -28,6 +28,7 @@ class TradeSignal:
 class StrategyConfig:
     min_edge: float = 0.05          # Minimum edge (prob - price) — must be meaningful
     min_prob: float = 0.80          # Minimum model probability to consider entry
+    safety_factor: float = 0.85     # Price must be <= true_prob * safety_factor
     entry_window_start: int = 240
     entry_window_end: int = 10
     max_price: float = 0.90
@@ -132,18 +133,20 @@ class TradingStats:
     def win_rate(self) -> float:
         return (self.wins / self.total_trades * 100) if self.total_trades > 0 else 0.0
 
-    def record_win(self, profit: float):
+    def record_win(self, profit: float, update_bankroll: bool = True):
         self.total_trades += 1
         self.wins += 1
         self.total_pnl += profit
-        self.bankroll += profit
+        if update_bankroll:
+            self.bankroll += profit
         self.hourly.record_result(profit, won=True)
 
-    def record_loss(self, loss: float):
+    def record_loss(self, loss: float, update_bankroll: bool = True):
         self.total_trades += 1
         self.losses += 1
         self.total_pnl -= abs(loss)
-        self.bankroll -= abs(loss)
+        if update_bankroll:
+            self.bankroll -= abs(loss)
         self.hourly.record_result(-abs(loss), won=False)
 
     def to_dict(self) -> dict:
@@ -184,7 +187,9 @@ def kelly_bet_size(
         return 0.0
 
     bet = bankroll * kelly_f * fraction
-    return max(min(bet, max_bet), min_bet)
+    if bet < min_bet:
+        return 0.0
+    return min(bet, max_bet, bankroll)
 
 
 def estimate_true_probability(
@@ -241,8 +246,20 @@ def get_skip_reason(
     if true_prob < config.min_prob:
         return "prob_below_min"
     edge = true_prob - market_price
+    if market_price > true_prob * config.safety_factor:
+        return "safety_factor"
     if edge < config.min_edge:
         return "edge_below_min"
+    bet_size = kelly_bet_size(
+        true_prob=true_prob,
+        market_price=market_price,
+        bankroll=100.0,
+        fraction=config.kelly_fraction,
+        min_bet=config.min_bet,
+        max_bet=config.max_bet,
+    )
+    if bet_size < config.min_bet:
+        return "kelly_below_min"
     return ""
 
 
@@ -295,6 +312,9 @@ def evaluate(
 
     # Filter 2: Must have real edge over market price
     edge = true_prob - market_price
+    if market_price > true_prob * config.safety_factor:
+        return None
+
     if edge < config.min_edge:
         return None
 
@@ -306,6 +326,8 @@ def evaluate(
         min_bet=config.min_bet,
         max_bet=config.max_bet,
     )
+    if bet_size < config.min_bet:
+        return None
 
     confidence = min(edge / 0.10, 1.0)
 

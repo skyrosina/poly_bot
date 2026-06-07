@@ -98,20 +98,28 @@ FUNDER_ADDRESS -> DEPOSIT_WALLET_ADDRESS -> SAFE_ADDRESS
 ## 4. Strategy and Risk Settings
 
 ```env
-MIN_EDGE=0.05
-MIN_PROB=0.80
-MIN_BTC_DELTA=0.06
-ENTRY_WINDOW_START=240
+LIVE_SAFE_MODE=true
+MIN_EDGE=0.10
+MIN_PROB=0.90
+SAFETY_FACTOR=0.85
+MIN_BTC_DELTA=0.10
+ENTRY_WINDOW_START=25
 ENTRY_WINDOW_END=10
-KELLY_FRACTION=0.25
+ENTRY_CONFIRM_SECONDS=2.0
+KELLY_FRACTION=0.10
 MIN_BET=5.0
-MAX_BET=25.0
+MAX_BET=5.0
 BANKROLL=100.0
-DAILY_LOSS_LIMIT=30.0
+DAILY_LOSS_LIMIT=5.0
+VOL_FLOOR=0.12
+PRICE_REFRESH_SECONDS=2.0
 ```
 
 Set `BANKROLL` to the amount you want the bot to size against. In live mode,
 the bot overwrites this with the actual CLOB collateral balance after startup.
+
+`LIVE_SAFE_MODE=true` is recommended for live testing. It forces a conservative
+minimum threshold even if older `.env` values are still present.
 
 ## 5. Optional Telegram Alerts
 

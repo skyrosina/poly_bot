@@ -94,17 +94,27 @@ Leave all three blank if you want the SDK to create or derive credentials from
 ## Strategy Defaults
 
 ```env
-MIN_EDGE=0.05
-MIN_PROB=0.80
-MIN_BTC_DELTA=0.06
-ENTRY_WINDOW_START=240
+MIN_EDGE=0.10
+MIN_PROB=0.90
+SAFETY_FACTOR=0.85
+MIN_BTC_DELTA=0.10
+ENTRY_WINDOW_START=25
 ENTRY_WINDOW_END=10
-KELLY_FRACTION=0.25
+ENTRY_CONFIRM_SECONDS=2.0
+KELLY_FRACTION=0.10
 MIN_BET=5.0
-MAX_BET=25.0
+MAX_BET=5.0
 BANKROLL=100.0
-DAILY_LOSS_LIMIT=30.0
+DAILY_LOSS_LIMIT=5.0
+PRICE_REFRESH_SECONDS=2.0
 ```
+
+Live mode defaults to `LIVE_SAFE_MODE=true`, which clamps aggressive `.env`
+values to a more selective profile: `MIN_PROB>=0.90`, `MIN_EDGE>=0.10`,
+`MIN_BTC_DELTA>=0.10`, `ENTRY_WINDOW_START<=25`, `ENTRY_WINDOW_END>=10`,
+`ENTRY_CONFIRM_SECONDS>=2`, `KELLY_FRACTION<=0.10`, `MAX_BET<=5`,
+`DAILY_LOSS_LIMIT<=5`, `VOL_FLOOR>=0.12`, and `PRICE_REFRESH_SECONDS<=2`.
+Disable this only after you have enough live data to justify the extra risk.
 
 The strategy holds positions to resolution. There are no stop-loss or
 take-profit exits because prior live data showed they were harmful on 5-minute
