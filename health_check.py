@@ -184,7 +184,10 @@ def main() -> int:
         else:
             print("api credentials: loaded from .env")
 
-        params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        params = BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL,
+            signature_type=SignatureTypeV2(signature_type),
+        )
         try:
             client.update_balance_allowance(params)
         except Exception as e:

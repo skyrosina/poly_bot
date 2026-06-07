@@ -201,6 +201,7 @@ class Executor:
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL if token_id else AssetType.COLLATERAL,
                 token_id=token_id or None,
+                signature_type=self.signature_type,
             )
             self.client.update_balance_allowance(params)
             return True
@@ -212,7 +213,10 @@ class Executor:
         if not self._initialized or not self.client:
             return 0.0
         try:
-            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            params = BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=self.signature_type,
+            )
             bal = self.client.get_balance_allowance(params)
             return _collateral_units_to_usd(bal.get("balance", 0))
         except Exception as e:
