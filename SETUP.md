@@ -165,6 +165,12 @@ Compare Binance market-data routes:
 python latency_check.py --samples 5 --compare-binance-ws
 ```
 
+Measure sustained WebSocket lag using one open connection:
+
+```bash
+python latency_check.py --samples 3 --compare-binance-ws --ws-duration 20
+```
+
 The latency checker is read-only. It tests Polymarket CLOB/Gamma public
 endpoints and Binance REST/WebSocket. For this bot, CLOB price/book and Binance
 WebSocket should ideally average below about 350 ms.

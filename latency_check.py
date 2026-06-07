@@ -201,6 +201,61 @@ async def sample_binance_ws(samples: int, timeout: float, ws_url: str, label: st
     return [connect_result, first_trade_result, exchange_lag_result]
 
 
+async def sample_binance_ws_sustained(duration: float, timeout: float, ws_url: str, label: str = "") -> list[CheckResult]:
+    prefix = f"binance.ws.{label}" if label else "binance.ws"
+    connect_result = CheckResult(name=f"{prefix}.live_connect")
+    lag_result = CheckResult(name=f"{prefix}.live_lag", note="local clock dependent")
+    gap_result = CheckResult(name=f"{prefix}.local_msg_gap", note="receive-to-receive gap")
+
+    try:
+        import websockets
+    except ImportError:
+        msg = "websockets package is not installed"
+        connect_result.errors.append(msg)
+        lag_result.errors.append(msg)
+        gap_result.errors.append(msg)
+        return [connect_result, lag_result, gap_result]
+
+    try:
+        started = time.perf_counter()
+        async with websockets.connect(
+            ws_url,
+            open_timeout=timeout,
+            ping_interval=None,
+            close_timeout=1,
+        ) as ws:
+            connected = time.perf_counter()
+            connect_result.samples_ms.append((connected - started) * 1000)
+
+            deadline = time.perf_counter() + duration
+            last_recv = 0.0
+            while time.perf_counter() < deadline:
+                remaining = max(0.1, min(timeout, deadline - time.perf_counter()))
+                try:
+                    message = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    break
+
+                received = time.perf_counter()
+                if last_recv > 0:
+                    gap_result.samples_ms.append((received - last_recv) * 1000)
+                last_recv = received
+
+                data = json.loads(message)
+                event_time = int(data.get("E", 0) or 0)
+                if event_time > 0:
+                    lag_result.samples_ms.append(max(0.0, now_ms() - event_time))
+    except Exception as exc:
+        err = str(exc)
+        connect_result.errors.append(err)
+        lag_result.errors.append(err)
+        gap_result.errors.append(err)
+
+    if lag_result.samples_ms:
+        lag_result.note = f"{lag_result.note}; messages={len(lag_result.samples_ms)}"
+    return [connect_result, lag_result, gap_result]
+
+
 def grade(avg_ms: float) -> str:
     if avg_ms <= 0:
         return "FAIL"
@@ -254,6 +309,12 @@ def main():
         "--compare-binance-ws",
         action="store_true",
         help="Compare stream.binance.com and data-stream.binance.vision.",
+    )
+    parser.add_argument(
+        "--ws-duration",
+        type=float,
+        default=float(os.getenv("LATENCY_WS_DURATION", "0")),
+        help="Keep each Binance WS connection open for N seconds and measure sustained message lag.",
     )
     parser.add_argument("--skip-ws", action="store_true", help="Skip Binance WebSocket check.")
     args = parser.parse_args()
@@ -313,8 +374,29 @@ def main():
                 ws_checks.append(("configured", configured))
             for label, ws_url in ws_checks:
                 results.extend(asyncio.run(sample_binance_ws(samples, timeout, ws_url, label)))
+                if args.ws_duration > 0:
+                    results.extend(
+                        asyncio.run(
+                            sample_binance_ws_sustained(
+                                args.ws_duration,
+                                timeout,
+                                ws_url,
+                                label,
+                            )
+                        )
+                    )
         else:
             results.extend(asyncio.run(sample_binance_ws(samples, timeout, args.binance_ws_url.strip())))
+            if args.ws_duration > 0:
+                results.extend(
+                    asyncio.run(
+                        sample_binance_ws_sustained(
+                            args.ws_duration,
+                            timeout,
+                            args.binance_ws_url.strip(),
+                        )
+                    )
+                )
 
     print_results(results)
     print("Rule of thumb: for this bot, CLOB price/book and Binance WS should stay under ~350ms avg.")
