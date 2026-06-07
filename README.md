@@ -66,6 +66,22 @@ py health_check.py
 This checks geoblock status, CLOB V2 auth, signer/funder configuration, and
 collateral balance/allowance without placing orders.
 
+To check route latency from the current server:
+
+```bash
+py latency_check.py --samples 5
+```
+
+On Linux/Droplet:
+
+```bash
+python latency_check.py --samples 5
+```
+
+For this strategy, Binance WebSocket and Polymarket CLOB price/book checks
+should ideally stay below about 350 ms average. If they are consistently slow,
+move the bot closer to the faster route or widen safety filters.
+
 ## Required `.env` Values
 
 ```env
