@@ -62,13 +62,24 @@ class OrderResult:
 
 
 def calculate_order_size(price: float, max_usd: float) -> tuple[float, float]:
-    """Integer shares times cents price = clean 2-decimal collateral amount."""
+    """Return integer shares and clean collateral amount.
+
+    Polymarket rejects buys below $5 notional. When max_usd is exactly $5 and
+    price is high, rounding shares down can produce a $4.xx order. In that
+    case, round up to the minimum share count needed for the exchange minimum.
+    """
     if price <= 0 or max_usd <= 0:
         return 0.0, 0.0
 
     price_cents = round(price * 100)
     max_usd_cents = int(max_usd * 100)
+    min_notional_cents = int(POLY_MIN_NOTIONAL * 100)
     max_shares = max_usd_cents // price_cents if price_cents > 0 else 0
+    min_notional_shares = (
+        (min_notional_cents + price_cents - 1) // price_cents
+        if price_cents > 0
+        else 0
+    )
 
     if max_shares < MIN_SHARES:
         min_cost_cents = int(MIN_SHARES) * price_cents
@@ -77,7 +88,7 @@ def calculate_order_size(price: float, max_usd: float) -> tuple[float, float]:
         else:
             return 0.0, 0.0
 
-    shares = int(max_shares)
+    shares = int(max(max_shares, min_notional_shares))
     spend = shares * price_cents / 100.0
     if shares < MIN_SHARES:
         return 0.0, 0.0
@@ -251,16 +262,28 @@ class Executor:
                 side="BUY",
             )
 
+        sim_price = round(float(price), 2) if price > 0 else 0.55
+        shares, clean_amount = calculate_order_size(sim_price, amount_usd)
+        if shares < 1 or clean_amount < POLY_MIN_NOTIONAL:
+            return OrderResult(
+                success=False,
+                status=REJECTED,
+                error=f"Amount ${clean_amount:.2f} < ${POLY_MIN_NOTIONAL:.0f} min",
+                side="BUY",
+                price=sim_price,
+                token_id=token_id[:16] + "...",
+                dry_run=self.dry_run,
+            )
+
         if self.dry_run:
-            sim_price = 0.55
             return OrderResult(
                 success=True,
                 order_id=f"DRY-{int(time.time())}",
                 status=FILLED,
                 side="BUY",
                 price=sim_price,
-                amount_usd=amount_usd,
-                shares=amount_usd / sim_price,
+                amount_usd=clean_amount,
+                shares=shares,
                 token_id=token_id[:16] + "...",
                 dry_run=True,
             )
