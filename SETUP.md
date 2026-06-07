@@ -223,10 +223,28 @@ Run continuously:
 python follow_jetfadil.py --poll-seconds 15 --limit 500
 ```
 
+For denser market snapshots, use a shorter poll:
+
+```bash
+python follow_jetfadil.py --poll-seconds 5 --limit 500
+```
+
 Logs are written to:
 
 ```text
 research_logs/jetfadil/
+```
+
+Important files:
+
+```text
+trades.csv              realized public trades
+markets_latest.csv      per-market hedge/ladder summary
+positions_latest.csv    current public positions
+position_changes.csv    position/PnL changes
+snapshots.csv           BTC/ETH price + Polymarket UP/DOWN price/book snapshots
+snapshots_latest.csv    latest snapshot row per watched family
+trade_context.csv       immediate snapshot captured when a new JetFadil trade appears
 ```
 
 ## 8. Live Checklist

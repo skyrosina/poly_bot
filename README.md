@@ -205,9 +205,19 @@ markets_latest.csv
 markets_history.csv
 positions_latest.csv
 position_changes.csv
+snapshots.csv
+snapshots_latest.csv
+trade_context.csv
 trades_raw.jsonl
 state.json
 ```
+
+`snapshots.csv` records the current BTC/ETH market screen at each poll: Binance
+BTC/ETH price, Polymarket UP/DOWN buy prices, best bid/ask, pair sums, spread,
+time to close, endpoint timings, and whether JetFadil has traded that market.
+`trade_context.csv` records an immediate market snapshot whenever a new public
+JetFadil trade is detected, including `trade_seen_lag_s`, so timing drift is
+visible during analysis.
 
 ## Current V2 Execution Notes
 
