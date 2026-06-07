@@ -85,6 +85,7 @@ def main() -> int:
     clob_api_url = os.getenv("CLOB_API_URL", "https://clob.polymarket.com").rstrip("/")
     chain_id = int(os.getenv("CHAIN_ID", "137"))
     dry_run = env_bool("DRY_RUN", "true")
+    check_geoblock_enabled = env_bool("CHECK_GEOBLOCK", "true")
 
     print("PolyBot CLOB V2 Health Check")
     print("=" * 34)
@@ -94,6 +95,7 @@ def main() -> int:
     print(f"SIGNATURE_TYPE: {signature_type} ({SIGNATURE_LABELS.get(signature_type, 'unknown')})")
     print(f"FUNDER_ADDRESS: {mask(funder)}")
     print(f"PRIVATE_KEY: {'set' if private_key else 'blank'}")
+    print(f"CHECK_GEOBLOCK: {check_geoblock_enabled}")
 
     if signature_type not in SIGNATURE_LABELS:
         print("\nFAIL: SIGNATURE_TYPE must be 0, 1, 2, or 3.")
@@ -104,18 +106,21 @@ def main() -> int:
         return 1
 
     print("\nGeoblock")
-    try:
-        geo = check_geoblock()
-        print(
-            f"country={geo.get('country')} region={geo.get('region') or '-'} "
-            f"blocked={geo.get('blocked')}"
-        )
-        if geo.get("blocked"):
-            print("FAIL: Current IP is blocked for Polymarket order placement.")
+    if not check_geoblock_enabled:
+        print("skipped because CHECK_GEOBLOCK=false")
+    else:
+        try:
+            geo = check_geoblock()
+            print(
+                f"country={geo.get('country')} region={geo.get('region') or '-'} "
+                f"blocked={geo.get('blocked')}"
+            )
+            if geo.get("blocked"):
+                print("FAIL: Current IP is blocked for Polymarket order placement.")
+                return 1
+        except Exception as e:
+            print(f"FAIL: Could not verify geoblock status: {e}")
             return 1
-    except Exception as e:
-        print(f"FAIL: Could not verify geoblock status: {e}")
-        return 1
 
     print("\nCLOB SDK")
     try:
