@@ -67,9 +67,15 @@ CLOB_PASS_PHRASE=
 CLOB_API_URL=https://clob.polymarket.com
 CHAIN_ID=137
 DRY_RUN=true
+PAPER_USE_LIVE_CLOB=true
 CHECK_GEOBLOCK=true
 USE_TOR=false
 ```
+
+`PAPER_USE_LIVE_CLOB=true` keeps dry-run wallet-free and order-free, but uses
+live Polymarket CLOB public prices for entries and position monitoring. This is
+recommended because the old simulated dry-run price engine can look much better
+than real execution.
 
 If you already have CLOB API credentials, fill all three:
 

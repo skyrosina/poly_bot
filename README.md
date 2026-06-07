@@ -116,9 +116,15 @@ FUNDER_ADDRESS=0x...
 CLOB_API_URL=https://clob.polymarket.com
 CHAIN_ID=137
 DRY_RUN=true
+PAPER_USE_LIVE_CLOB=true
 CHECK_GEOBLOCK=true
 USE_TOR=false
 ```
+
+With `DRY_RUN=true` and `PAPER_USE_LIVE_CLOB=true`, the bot still places no
+orders and does not need a wallet, but it uses live Polymarket CLOB public
+prices for entries and position monitoring. This is much closer to live mode
+than the old simulated dry-run price engine.
 
 Optional API credentials:
 

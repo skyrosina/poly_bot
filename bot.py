@@ -31,6 +31,7 @@ import signal
 import math
 import statistics
 import json
+import urllib.parse
 import urllib.request
 from dotenv import load_dotenv
 
@@ -79,10 +80,12 @@ class PolyBot:
         load_dotenv()
 
         self.dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+        self.paper_use_live_clob = self.dry_run and _env_bool("PAPER_USE_LIVE_CLOB", "true")
         self._live_safe_mode = _env_bool("LIVE_SAFE_MODE", "true")
         self.use_tor = _env_bool("USE_TOR", "false")
         self.check_geoblock = _env_bool("CHECK_GEOBLOCK", "true")
         self.period = int(os.getenv("MARKET_PERIOD", "5"))
+        self.clob_api_url = os.getenv("CLOB_API_URL", "https://clob.polymarket.com").rstrip("/")
 
         self.strategy_config = StrategyConfig(
             min_edge=float(os.getenv("MIN_EDGE", "0.05")),
@@ -105,7 +108,7 @@ class PolyBot:
         self._entry_confirm_seconds = float(os.getenv("ENTRY_CONFIRM_SECONDS", "0.0"))
         self._max_btc_feed_lag_ms = float(os.getenv("MAX_BTC_FEED_LAG_MS", "0"))
 
-        if not self.dry_run and self._live_safe_mode:
+        if (not self.dry_run or self.paper_use_live_clob) and self._live_safe_mode:
             self.strategy_config.min_prob = max(self.strategy_config.min_prob, 0.90)
             self.strategy_config.min_edge = max(self.strategy_config.min_edge, 0.10)
             self.strategy_config.safety_factor = min(self.strategy_config.safety_factor, 0.85)
@@ -135,7 +138,7 @@ class PolyBot:
                 or os.getenv("SAFE_ADDRESS", "")
             ),
             signature_type=int(os.getenv("SIGNATURE_TYPE", "3")),
-            clob_api_url=os.getenv("CLOB_API_URL", "https://clob.polymarket.com"),
+            clob_api_url=self.clob_api_url,
             chain_id=int(os.getenv("CHAIN_ID", "137")),
             clob_api_key=os.getenv("CLOB_API_KEY", ""),
             clob_api_secret=os.getenv("CLOB_SECRET", ""),
@@ -205,7 +208,7 @@ class PolyBot:
         self._cached_down: float = 0.50
         self._price_last_fetched: float = 0.0
         self._PRICE_REFRESH: float = float(os.getenv("PRICE_REFRESH_SECONDS", "5.0"))
-        if not self.dry_run and self._live_safe_mode:
+        if (not self.dry_run or self.paper_use_live_clob) and self._live_safe_mode:
             self._PRICE_REFRESH = min(self._PRICE_REFRESH, 1.0)
         self._market_cache = None
         self._market_cache_window: int = 0
@@ -271,7 +274,9 @@ class PolyBot:
         print(f"  Exits: hold to resolution")
         print(f"  Daily loss limit: ${self._daily_loss_limit:.0f}")
         print(f"  Bankroll: ${self.stats.bankroll:.2f}")
-        if not self.dry_run:
+        if self.dry_run and self.paper_use_live_clob:
+            print("  Paper pricing: live Polymarket CLOB")
+        if not self.dry_run or self.paper_use_live_clob:
             print(f"  Live safe mode: {'ON' if self._live_safe_mode else 'OFF'}")
         print("=" * 55)
 
@@ -286,7 +291,10 @@ class PolyBot:
             self._last_real_balance = balance
             self.tracker.set_session_balance(balance)
         else:
-            print("  [dry run — no wallet connection]")
+            if self.paper_use_live_clob:
+                print("  [dry run - live CLOB prices, no wallet orders]")
+            else:
+                print("  [dry run - simulated prices, no wallet connection]")
             self._session_start_balance = self.stats.bankroll
             self._last_real_balance = self.stats.bankroll
             self.tracker.set_session_balance(self.stats.bankroll)
@@ -339,7 +347,7 @@ class PolyBot:
         feed_lag_ms = self.price_feed.state.get_lag_ms()
         feed_source = self.price_feed.state.source
         feed_lag_too_high = (
-            not self.dry_run
+            ((not self.dry_run) or self.paper_use_live_clob)
             and self._max_btc_feed_lag_ms > 0
             and feed_source == "ws"
             and feed_lag_ms > self._max_btc_feed_lag_ms
@@ -464,7 +472,11 @@ class PolyBot:
         self._last_position_check = now
 
         # Get current sell price (for tracking only)
-        if self.dry_run:
+        if self.dry_run and self.paper_use_live_clob and not self._trade_token_id.startswith("DRY-"):
+            current_sell_price = self._get_public_clob_price(self._trade_token_id, "SELL")
+            if current_sell_price <= 0:
+                current_sell_price = round(max(our_prob, 0.01), 2)
+        elif self.dry_run:
             current_sell_price = round(max(our_prob, 0.01), 2)
         else:
             sell_probe = round(self._trade_shares * self._trade_price, 2)
@@ -769,8 +781,36 @@ class PolyBot:
         self._candidate_since = 0.0
         self._candidate_delta_pct = 0.0
 
+    def _get_public_clob_price(self, token_id: str, side: str) -> float:
+        if not token_id:
+            return 0.0
+        try:
+            query = urllib.parse.urlencode({
+                "token_id": token_id,
+                "side": side.upper(),
+            })
+            req = urllib.request.Request(
+                f"{self.clob_api_url}/price?{query}",
+                headers={"User-Agent": "PolyBot/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+            if isinstance(data, dict):
+                raw_price = data.get("price", 0)
+            else:
+                raw_price = data
+            price = float(raw_price)
+            return price if 0 < price < 1 else 0.0
+        except Exception as e:
+            err = str(e).lower()
+            if "no match" not in err and "404" not in err:
+                print(f"[price] Public CLOB price failed: {e}")
+            return 0.0
+
     def _get_current_market_cached(self):
-        if self.dry_run or not self.executor._initialized:
+        if self.dry_run and not self.paper_use_live_clob:
+            return None
+        if not self.dry_run and not self.executor._initialized:
             return None
 
         now = time.time()
@@ -788,7 +828,9 @@ class PolyBot:
         return None
 
     def _get_market_prices(self, btc_price: float, seconds_remaining: float) -> tuple:
-        if self.dry_run or not self.executor._initialized:
+        if (self.dry_run and not self.paper_use_live_clob) or (
+            not self.dry_run and not self.executor._initialized
+        ):
             if self._opening_price <= 0:
                 return 0.50, 0.50
             delta_pct = (btc_price - self._opening_price) / self._opening_price
@@ -808,8 +850,12 @@ class PolyBot:
                 return self._cached_up, self._cached_down
 
             probe_amount = 5.0
-            up_price = self.executor.get_market_price(market.token_id_up, "BUY", probe_amount)
-            down_price = self.executor.get_market_price(market.token_id_down, "BUY", probe_amount)
+            if self.paper_use_live_clob:
+                up_price = self._get_public_clob_price(market.token_id_up, "BUY")
+                down_price = self._get_public_clob_price(market.token_id_down, "BUY")
+            else:
+                up_price = self.executor.get_market_price(market.token_id_up, "BUY", probe_amount)
+                down_price = self.executor.get_market_price(market.token_id_down, "BUY", probe_amount)
 
             if up_price <= 0 and down_price <= 0:
                 return self._cached_up, self._cached_down
@@ -867,11 +913,12 @@ class PolyBot:
             self.telegram.status_update({"alert": msg})
             return
 
-        market = self._get_current_market_cached() if not self.dry_run else None
+        use_live_market = (not self.dry_run) or self.paper_use_live_clob
+        market = self._get_current_market_cached() if use_live_market else None
         token_id = ""
         if market:
             token_id = market.token_id_up if sig.side == "UP" else market.token_id_down
-        elif not self.dry_run:
+        elif use_live_market:
             print("  Market not found for current window - skipping live entry")
             return
         else:
@@ -887,8 +934,11 @@ class PolyBot:
         # Preview actual market price, re-check edge, then pass price into buy()
         # so executor skips a second fetch (saves one Tor roundtrip ~500ms)
         hint_price = 0.0
-        if not self.dry_run and self.executor._initialized:
-            actual_price = self.executor.get_market_price(token_id, "BUY", trade_amount)
+        if self.paper_use_live_clob or (not self.dry_run and self.executor._initialized):
+            if self.paper_use_live_clob:
+                actual_price = self._get_public_clob_price(token_id, "BUY")
+            else:
+                actual_price = self.executor.get_market_price(token_id, "BUY", trade_amount)
             if actual_price > 0:
                 actual_edge = sig.true_prob - actual_price
                 print(f"  📊 Actual price: ${actual_price:.3f} (edge: {actual_edge:.3f})")
