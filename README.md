@@ -179,6 +179,36 @@ markets.
 - Window-boundary balance sync against live CLOB collateral balance.
 - Minimum notional guard before sells.
 
+## Research: Follow JetFadil
+
+`follow_jetfadil.py` is a read-only public-data follower. It does not use a
+wallet and does not place orders. It records JetFadil's public trades,
+positions, and per-market two-sided inventory summaries.
+
+Run once:
+
+```bash
+python follow_jetfadil.py --once --limit 500
+```
+
+Run continuously:
+
+```bash
+python follow_jetfadil.py --poll-seconds 15 --limit 500
+```
+
+Outputs go to `research_logs/jetfadil/`:
+
+```text
+trades.csv
+markets_latest.csv
+markets_history.csv
+positions_latest.csv
+position_changes.csv
+trades_raw.jsonl
+state.json
+```
+
 ## Current V2 Execution Notes
 
 - Buys use V2 `create_and_post_order` with integer shares and 2-decimal prices.

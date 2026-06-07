@@ -205,7 +205,31 @@ feed, market discovery, strategy logic, and simulated trade flow.
 
 Run at least a few windows before switching to live.
 
-## 7. Live Checklist
+## 7. Research: Follow JetFadil
+
+This read-only script records JetFadil's public trades, current positions, and
+per-market two-sided inventory summaries. It does not use a wallet and does not
+place orders.
+
+Run once:
+
+```bash
+python follow_jetfadil.py --once --limit 500
+```
+
+Run continuously:
+
+```bash
+python follow_jetfadil.py --poll-seconds 15 --limit 500
+```
+
+Logs are written to:
+
+```text
+research_logs/jetfadil/
+```
+
+## 8. Live Checklist
 
 Before setting `DRY_RUN=false`:
 
