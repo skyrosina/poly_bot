@@ -5,6 +5,7 @@ Falls back to REST API polling if WebSocket fails.
 """
 
 import json
+import os
 import time
 import threading
 import urllib.request
@@ -12,8 +13,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Callable
 
 
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
-BINANCE_REST_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+DEFAULT_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+DEFAULT_BINANCE_REST_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
 
 @dataclass
@@ -45,6 +46,8 @@ class PriceState:
 class BinancePriceFeed:
     def __init__(self):
         self.state = PriceState()
+        self.ws_url = os.getenv("BINANCE_WS_URL", DEFAULT_BINANCE_WS_URL).strip()
+        self.rest_url = os.getenv("BINANCE_REST_URL", DEFAULT_BINANCE_REST_URL).strip()
         self._ws_thread: Optional[threading.Thread] = None
         self._running = False
         self._on_price: Optional[Callable] = None
@@ -75,7 +78,7 @@ class BinancePriceFeed:
             async def connect():
                 while self._running:
                     try:
-                        async with websockets.connect(BINANCE_WS_URL) as ws:
+                        async with websockets.connect(self.ws_url) as ws:
                             print("[price] WebSocket connected to Binance")
                             while self._running:
                                 msg = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -102,7 +105,7 @@ class BinancePriceFeed:
                 # Only poll if WebSocket data is stale
                 if not self.state.is_fresh:
                     req = urllib.request.Request(
-                        BINANCE_REST_URL,
+                        self.rest_url,
                         headers={"User-Agent": "PolyBot/1.0"},
                     )
                     resp = urllib.request.urlopen(req, timeout=5)

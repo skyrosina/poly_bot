@@ -78,9 +78,21 @@ On Linux/Droplet:
 python latency_check.py --samples 5
 ```
 
+Compare Binance market-data routes:
+
+```bash
+python latency_check.py --samples 5 --compare-binance-ws
+```
+
 For this strategy, Binance WebSocket and Polymarket CLOB price/book checks
 should ideally stay below about 350 ms average. If they are consistently slow,
 move the bot closer to the faster route or widen safety filters.
+
+If `data-stream.binance.vision` is faster on your server, set:
+
+```env
+BINANCE_WS_URL=wss://data-stream.binance.vision/ws/btcusdt@trade
+```
 
 ## Required `.env` Values
 

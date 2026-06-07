@@ -31,7 +31,8 @@ DEFAULT_CLOB_API_URL = "https://clob.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 BINANCE_REST_PING_URL = "https://api.binance.com/api/v3/ping"
 BINANCE_REST_PRICE_URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+DEFAULT_BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+MARKET_DATA_BINANCE_WS_URL = "wss://data-stream.binance.vision/ws/btcusdt@trade"
 PERIOD_SECONDS = {5: 300, 15: 900}
 
 
@@ -153,10 +154,14 @@ def discover_current_market(period_minutes: int, timeout: float) -> tuple[str, s
     return slug, up_token, down_token
 
 
-async def sample_binance_ws(samples: int, timeout: float) -> list[CheckResult]:
-    connect_result = CheckResult(name="binance.ws.connect")
-    first_trade_result = CheckResult(name="binance.ws.first_trade")
-    exchange_lag_result = CheckResult(name="binance.ws.exchange_lag", note="local clock dependent")
+async def sample_binance_ws(samples: int, timeout: float, ws_url: str, label: str = "") -> list[CheckResult]:
+    prefix = f"binance.ws.{label}" if label else "binance.ws"
+    connect_result = CheckResult(name=f"{prefix}.connect")
+    first_trade_result = CheckResult(name=f"{prefix}.first_trade")
+    exchange_lag_result = CheckResult(
+        name=f"{prefix}.exchange_lag",
+        note="local clock dependent",
+    )
 
     try:
         import websockets
@@ -171,7 +176,7 @@ async def sample_binance_ws(samples: int, timeout: float) -> list[CheckResult]:
         try:
             started = time.perf_counter()
             async with websockets.connect(
-                BINANCE_WS_URL,
+                ws_url,
                 open_timeout=timeout,
                 ping_interval=None,
                 close_timeout=1,
@@ -240,6 +245,16 @@ def main():
     parser.add_argument("--samples", type=int, default=int(os.getenv("LATENCY_SAMPLES", "5")))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("LATENCY_TIMEOUT", "5")))
     parser.add_argument("--period", type=int, default=int(os.getenv("MARKET_PERIOD", "5")))
+    parser.add_argument(
+        "--binance-ws-url",
+        default=os.getenv("BINANCE_WS_URL", DEFAULT_BINANCE_WS_URL),
+        help="Binance BTC trade WebSocket URL to test.",
+    )
+    parser.add_argument(
+        "--compare-binance-ws",
+        action="store_true",
+        help="Compare stream.binance.com and data-stream.binance.vision.",
+    )
     parser.add_argument("--skip-ws", action="store_true", help="Skip Binance WebSocket check.")
     args = parser.parse_args()
 
@@ -288,7 +303,18 @@ def main():
 
     results = [sample_http(name, url, samples, timeout) for name, url in endpoints]
     if not args.skip_ws:
-        results.extend(asyncio.run(sample_binance_ws(samples, timeout)))
+        if args.compare_binance_ws:
+            ws_checks = [
+                ("stream", DEFAULT_BINANCE_WS_URL),
+                ("marketdata", MARKET_DATA_BINANCE_WS_URL),
+            ]
+            configured = args.binance_ws_url.strip()
+            if configured not in [url for _, url in ws_checks]:
+                ws_checks.append(("configured", configured))
+            for label, ws_url in ws_checks:
+                results.extend(asyncio.run(sample_binance_ws(samples, timeout, ws_url, label)))
+        else:
+            results.extend(asyncio.run(sample_binance_ws(samples, timeout, args.binance_ws_url.strip())))
 
     print_results(results)
     print("Rule of thumb: for this bot, CLOB price/book and Binance WS should stay under ~350ms avg.")
